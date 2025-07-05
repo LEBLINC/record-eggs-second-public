@@ -1,1 +1,12 @@
 output/
+# === ignore ===
+__pycache__/
+*.pyc
+logs/
+*.log
+.idea/
+*.mp4
+duckEggData/
+
+__pycache__/
+*.pyc
