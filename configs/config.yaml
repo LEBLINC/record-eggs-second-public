@@ -1,4 +1,4 @@
-mode: 2 # 0：检测模式 1：数据采集模式 2：示范模式
+mode: 0 # 0：检测模式 1：数据采集模式 2：示范模式
 upload: True  # 是否上传,采集模式下不生效
 uploadUrl: http://8.138.181.75/leblinc_wenshi_eggCage/cageDuck/eggRecord/save   # 上传地址,采集模式下不生效
 deviceId: hn_xy_device_0001  # 设备号
@@ -19,3 +19,29 @@ demo_video: D:\Developer_tools\PycharmProjects\duckEggData\MOT\demo.mp4
 MQTT_broker_address: localhost
 MQTT_port: 3306
 MQTT_keepalive: 60
+# 固定为3个摄像头
+camera_count: 3
+
+camera_0:
+  video: 0
+  backend: 700  # DirectShow
+  width: 640
+  height: 480
+  fps: 0.0
+  table: duckdata1
+
+camera_1:
+  video: 1
+  backend: 700  # DirectShow
+  width: 640
+  height: 480
+  fps: 0.0
+  table: duckdata2
+
+camera_2:
+  video: 2
+  backend: 700  # DirectShow
+  width: 640
+  height: 480
+  fps: 0.0
+  table: duckdata3

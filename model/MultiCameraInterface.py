@@ -51,37 +51,14 @@ class CameraDetector:
             pass
 
         try:
-            for i in range(max_cameras):
-                cap = None
-                try:
-                    # 直接使用DirectShow，避免多次尝试其他backend
-                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            # 直接返回固定的摄像头ID列表
+            fixed_camera_ids = [0, 1, 2]  # 根据实际检测结果修改
+            print(f"使用固定摄像头ID: {fixed_camera_ids}")
+            return fixed_camera_ids
 
-                    if cap.isOpened():
-                        # 快速验证：只读取1帧确认可用性
-                        ret, frame = cap.read()
-                        if ret and frame is not None:
-                            self.available_cameras.append(i)
-                            self.camera_info[i] = {
-                                'backend': cv2.CAP_DSHOW,
-                                'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                                'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                                'fps': cap.get(cv2.CAP_PROP_FPS)
-                            }
-                            print(
-                                f"检测到摄像头 {i}: 分辨率{self.camera_info[i]['width']}x{self.camera_info[i]['height']}, "
-                                f"FPS={self.camera_info[i]['fps']:.1f}, backend={self._get_backend_name(cv2.CAP_DSHOW)}")
-
-                except Exception as e:
-                    # 静默处理异常，减少日志输出
-                    pass
-                finally:
-                    if cap:
-                        cap.release()
-                        cap = None
-                    # 减少等待时间，加快检测速度
-                    time.sleep(0.1)
-
+        except Exception as e:
+            # 静默处理异常，减少日志输出
+            pass
         finally:
             # 恢复原始日志级别
             try:
@@ -182,7 +159,7 @@ class MultiCameraFrameThread(BaseThread):
         print("开始检测和初始化多摄像头...")
 
         # 首先检测可用摄像头
-        self.available_cameras = self.camera_detector.detect_available_cameras()
+        self.available_cameras = [0, 1, 2]  # 固定ID
 
         if not self.available_cameras:
             print("错误：未检测到任何可用摄像头！")
@@ -199,7 +176,7 @@ class MultiCameraFrameThread(BaseThread):
             print(f"正在初始化摄像头 {i}...")
             if self.init_camera(i):
                 success_count += 1
-                time.sleep(1)  # 每个摄像头初始化后等待1秒
+                # 去掉等待时间，加快初始化速度
             else:
                 print(f"摄像头 {i} 初始化失败，跳过")
 
@@ -222,7 +199,7 @@ class MultiCameraFrameThread(BaseThread):
                 # 先释放现有连接
                 if self.caps[camera_idx]:
                     self.caps[camera_idx].release()
-                    time.sleep(0.5)
+                    time.sleep(0.1)  # 减少等待时间
                     self.caps[camera_idx] = None
 
                 # 获取最佳backend
@@ -240,7 +217,7 @@ class MultiCameraFrameThread(BaseThread):
 
                     for alt_backend in alternative_backends:
                         self.caps[camera_idx].release()
-                        time.sleep(0.3)
+                        time.sleep(0.1)  # 减少等待时间
                         self.caps[camera_idx] = cv2.VideoCapture(actual_camera_idx, alt_backend)
                         if self.caps[camera_idx].isOpened():
                             print(f"摄像头 {camera_idx} 使用备选backend {self._get_backend_name(alt_backend)} 成功")
@@ -256,14 +233,14 @@ class MultiCameraFrameThread(BaseThread):
                     print(f"摄像头 {camera_idx} 参数配置失败")
                     continue
 
-                # 预热摄像头
-                success = self._warmup_camera(camera_idx)
+                # 快速验证摄像头可用性（只读取一帧）
+                success = self._quick_camera_test(camera_idx)
                 if success:
                     print(f"摄像头 {camera_idx} 初始化成功")
                     self.last_successful_reads[camera_idx] = time.time()
                     return True
                 else:
-                    print(f"摄像头 {camera_idx} 预热失败，尝试重新初始化...")
+                    print(f"摄像头 {camera_idx} 验证失败，尝试重新初始化...")
 
             except Exception as e:
                 print(f"摄像头 {camera_idx} 初始化异常 (尝试 {attempt + 1}): {e}")
@@ -273,7 +250,7 @@ class MultiCameraFrameThread(BaseThread):
                     if self.caps[camera_idx]:
                         self.caps[camera_idx].release()
                         self.caps[camera_idx] = None
-                    time.sleep(1)  # 等待更长时间再重试
+                    time.sleep(0.2)  # 减少重试等待时间
 
         # 所有尝试都失败
         print(f"摄像头 {camera_idx} 初始化完全失败")
@@ -326,45 +303,26 @@ class MultiCameraFrameThread(BaseThread):
             print(f"摄像头 {camera_idx} 参数配置异常: {e}")
             return False
 
-    def _warmup_camera(self, camera_idx):
-        """预热摄像头（改进版）"""
+    def _quick_camera_test(self, camera_idx):
+        """快速验证摄像头可用性（只读取一帧）"""
         try:
             cap = self.caps[camera_idx]
-            successful_reads = 0
-            failed_reads = 0
-
-            # 先清空缓冲区
-            for _ in range(5):
+            
+            # 清空缓冲区（只清空2次，减少等待）
+            for _ in range(2):
                 cap.grab()
 
-            time.sleep(0.2)
-
-            # 尝试读取多帧来预热
-            for i in range(15):  # 增加尝试次数
-                ret = cap.grab()  # 先尝试grab
-                if ret:
-                    ret, frame = cap.retrieve()  # 再retrieve
-                    if ret and frame is not None:
-                        successful_reads += 1
-                        if successful_reads >= 1:  # 至少成功读取1帧
-                            print(f"摄像头 {camera_idx} 预热成功，成功读取 {successful_reads} 帧")
-                            return True
-                    else:
-                        failed_reads += 1
-                else:
-                    failed_reads += 1
-
-                # 如果连续失败太多次，提前退出
-                if failed_reads > 5:
-                    break
-
-                time.sleep(0.1)
-
-            print(f"摄像头 {camera_idx} 预热失败，成功读取 {successful_reads} 帧，失败 {failed_reads} 次")
-            return successful_reads > 0  # 至少读取到1帧就算可用
+            # 只读取一帧验证可用性
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                print(f"摄像头 {camera_idx} 验证成功，成功读取 1 帧")
+                return True
+            else:
+                print(f"摄像头 {camera_idx} 验证失败，无法读取帧")
+                return False
 
         except Exception as e:
-            print(f"摄像头 {camera_idx} 预热异常: {e}")
+            print(f"摄像头 {camera_idx} 验证异常: {e}")
             return False
 
     @exception_handler
@@ -380,8 +338,8 @@ class MultiCameraFrameThread(BaseThread):
                 pass
             self.caps[camera_idx] = None
 
-        # 等待系统释放资源
-        time.sleep(2)
+        # 等待系统释放资源（减少等待时间）
+        time.sleep(0.5)
 
         # 重新初始化
         return self.init_camera(camera_idx)
@@ -393,7 +351,7 @@ class MultiCameraFrameThread(BaseThread):
         if self.cap_false_counts[camera_idx] > 5:  # 增加容错次数
             print(f"摄像头 {camera_idx} 获取失败次数过多，尝试重新初始化")
             self.release_camera(camera_idx)
-            time.sleep(1)  # 等待更长时间
+            time.sleep(0.3)  # 减少等待时间
             self.init_camera(camera_idx)
             self.cap_false_counts[camera_idx] = 0
 
@@ -446,8 +404,8 @@ class MultiCameraFrameThread(BaseThread):
             print("摄像头初始化失败，线程退出")
             return
 
-        # 等待摄像头稳定
-        time.sleep(2)
+        # 等待摄像头稳定（减少等待时间）
+        time.sleep(0.5)
 
         while self.run_flag:
             try:
@@ -908,11 +866,11 @@ class MultiCameraInterface(QThread):
         """启动所有线程"""
         print("启动多摄像头接口所有线程")
         self.frame_thread.start()
-        time.sleep(1)  # 增加等待时间
+        time.sleep(0.2)  # 减少等待时间
         self.track_thread.start()
-        time.sleep(0.5)
+        time.sleep(0.1)  # 减少等待时间
         self.match_thread.start()
-        time.sleep(0.5)
+        time.sleep(0.1)  # 减少等待时间
         self.http_thread.start()
 
     def stop_interface(self):
