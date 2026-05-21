@@ -22,8 +22,8 @@ def get_default_config():
         'width': 1920,  # 视频宽度
         'height': 1080,  # 视频高度
         'video': 0,  # 默认视频源索引
-        'picture_save_path': 'D:/DuckEggData',  # 图片保存路径
-        'picture_recognition_path': 'D:/DuckEggData/Recognition',  # 识别图片保存路径
+        'picture_save_path': 'data/cameraData',  # 图片保存路径
+        'picture_recognition_path': 'output',  # 识别图片保存路径
 
         # 目标检测配置
         'modelPath': 'resources/best.pt',  # 模型路径
@@ -64,11 +64,61 @@ def get_default_config():
         'optimal_height': 480,  # 最佳处理高度
         'optimal_fps': 15,  # 最佳帧率
 
+        # 左侧进度条参数（巡检进度）
+        'progress_total_slots': 190,  # 38组*5
+        'progress_page_size': 5,      # 每页5个
+        'progress_square_px': 60,     # 方块边长
+        'progress_cell_gap': 80,      # 方块间距
+        'progress_index_mode': 'sequence',
+
         # GPU优化配置
         'gpu_optimization': {
             'use_fp16': False,  # 暂时关闭半精度，避免类型不匹配
             'use_tf32': True,  # 启用TF32加速（RTX 4060Ti支持）
         },
+
+        # 匹配增强参数
+        'matching': {
+            'alpha_x': 0.45,
+            'beta_edge': 0.12,
+            'switch_n': 6,
+            'switch_margin_ratio': 0.2,
+            'stable_T': 8,
+            'lock_T': 4,
+            'switch_requires_prev_missing': True,
+            'egg_detect_min_conf': 0.30,
+            'vertical_roi': {
+                'enabled': True,
+                'qr_offset_ratio': 0.2,
+                'bottom_ratio': 0.95,
+            },
+        },
+
+        # 二维码解码节流与早期解码配置
+        'qr_decode': {
+            'use_async': True,
+            'max_workers': 1,
+            'global_interval_ms': 250,
+            'try_interval_ms': 600,
+            'max_tries': 30,
+            'min_box_size': 14,
+            'target_min_side': 360,
+            'scales': [1, 2],
+            'debug_save': False,
+            'debug_dir': 'output/qr_debug',
+            'early_decode_enabled': True,
+            'early_decode_interval_ms': 700,
+            'early_decode_min_box_size': 24,
+            'early_decode_max_per_frame': 1,
+            'early_decode_success_ttl_s': 90,
+            'qr_filter_enabled': True,
+            'qr_top_ratio': 0.45,
+            'qr_keep_seconds': 0.4,
+        },
+
+        # 导航服务默认配置
+        'nav_base_url': 'http://192.168.22.126:18000',
+        'nav_map_name': 'wenshi_10',
 
         # 摄像头配置（保持原有配置）
         'camera_0': {

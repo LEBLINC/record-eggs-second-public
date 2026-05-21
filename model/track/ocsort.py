@@ -112,8 +112,14 @@ class KalmanBoxTracker(object):
         self.id = KalmanBoxTracker.count
         KalmanBoxTracker.count += 1
         self.history = []
-        self.hits = 0
-        self.hit_streak = 0
+        # 关键修复：
+        # 该 tracker 在 __init__ 时已经拿到了第一帧的观测 bbox（等价于“命中一次”），
+        # 但原实现将 hits/hit_streak 初始化为 0，会导致：
+        # - 新目标在进入画面后的第一帧“创建了轨迹但不输出 track_id”
+        # - 若推理FPS较低（移动场景下目标只出现 1-2 帧），下游永远拿不到 boxes.id，从而表现为“移动中不检，停下才检”
+        # 这里将首次观测计为一次命中，确保 min_hits=1 时可立即输出 track_id。
+        self.hits = 1
+        self.hit_streak = 1
         self.age = 0
         self.conf = bbox[-1]
         self.cls = cls
@@ -148,7 +154,7 @@ class KalmanBoxTracker(object):
                 if previous_box is None:
                     previous_box = self.last_observation
                 """
-                  Estimate the track speed direction with observations \Delta t steps away
+                  Estimate the track speed direction with observations \\Delta t steps away
                 """
                 self.velocity = speed_direction(previous_box, bbox)
 
@@ -202,6 +208,8 @@ class OCSort(object):
         asso_func="iou",
         inertia=0.2,
         use_byte=False,
+        low_thresh=0.1,
+        edge_filter_ratio=0.05,
     ):
         """
         Sets key parameters for SORT
@@ -216,9 +224,20 @@ class OCSort(object):
         self.asso_func = get_asso_func(asso_func)
         self.inertia = inertia
         self.use_byte = use_byte
+        # 低分阈值：score > low_thresh 的检测才会进入 BYTE 二次关联 / 低分建轨逻辑
+        # 说明：原实现写死为 0.1；新场景移动模糊下置信度可能掉到 0.05~0.1，需可配置
+        try:
+            self.low_thresh = float(low_thresh) if low_thresh is not None else 0.1
+        except Exception:
+            self.low_thresh = 0.1
+        # 过滤靠近图像左右边缘的检测框（比例，0=关闭）
+        try:
+            self.edge_filter_ratio = float(edge_filter_ratio) if edge_filter_ratio is not None else 0.0
+        except Exception:
+            self.edge_filter_ratio = 0.05
         KalmanBoxTracker.count = 0
 
-    def update(self, dets, img):
+    def update(self, dets, img, feats=None):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score],[x1,y1,x2,y2,score],...]
@@ -232,30 +251,61 @@ class OCSort(object):
         assert isinstance(dets, np.ndarray), f"Unsupported 'dets' input type '{type(dets)}', valid format is np.ndarray"
         assert isinstance(img, np.ndarray), f"Unsupported 'img' input type '{type(img)}', valid format is np.ndarray"
         assert len(dets.shape) == 2, "Unsupported 'dets' dimensions, valid number of dimensions is two"
-        assert dets.shape[1] == 6, "Unsupported 'dets' 2nd dimension lenght, valid lenghts is 6"
+        # Ultralytics Boxes 格式可能是：
+        # - (N,6): [x1,y1,x2,y2, conf, cls]
+        # - (N,7): [x1,y1,x2,y2, track_id, conf, cls]
+        # 这里做兼容转换，内部统一成 (N,6): [x1,y1,x2,y2, conf, cls]
+        if dets.shape[1] == 7:
+            dets = dets[:, [0, 1, 2, 3, 5, 6]]
+        elif dets.shape[1] == 6:
+            pass
+        elif dets.shape[1] == 5:
+            # 兼容极端情况：若无 cls 列，默认单类=0（不推荐用于多类场景）
+            dets = np.concatenate([dets, np.zeros((len(dets), 1), dtype=dets.dtype)], axis=1)
+        else:
+            # 空检测或未知格式，直接返回空
+            if dets.size == 0:
+                dets = np.empty((0, 6))
+            else:
+                raise AssertionError(
+                    f"Unsupported 'dets' 2nd dimension lenght={dets.shape[1]}, valid lenghts are 6 or 7"
+                )
 
-        # 去除边缘的框
+        # 去除边缘的框（可配置）
         height, width = img.shape[:2]
-        filtered_boxes = []
-        for box in dets:
-            x1, _, x2, _, _, _ = box
-            if x1 > width * 0.05 and x2 < width - width * 0.05:
-                filtered_boxes.append(box)
-        dets = np.array(filtered_boxes)
-        if len(dets) == 0:
-            dets = np.empty((0, 6))
+        edge_r = getattr(self, "edge_filter_ratio", 0.05) or 0.0
+        if edge_r > 0:
+            edge_px = width * float(edge_r)
+            filtered_boxes = []
+            for box in dets:
+                x1 = box[0]
+                x2 = box[2]
+                if x1 > edge_px and x2 < (width - edge_px):
+                    filtered_boxes.append(box)
+            dets = np.array(filtered_boxes)
+            if len(dets) == 0:
+                dets = np.empty((0, 6))
 
         self.frame_count += 1
         dets = np.hstack([dets, np.arange(len(dets)).reshape(-1, 1)])
         confs = dets[:, 4]
-        inds_low = confs > 0.1
+        low_th = getattr(self, "low_thresh", 0.1) or 0.1
+        inds_low = confs > low_th
         inds_high = confs < self.det_thresh
         inds_second = np.logical_and(
             inds_low, inds_high
-        )  # self.det_thresh > score > 0.1, for second matching
+        )  # self.det_thresh > score > low_th, for second matching
         dets_second = dets[inds_second]  # detections for second matching
         remain_inds = confs > self.det_thresh
         dets = dets[remain_inds]
+
+        # 若仅存在低置信度检测框，默认 OC-SORT/ByteTrack 只会用它们“补跟踪”，不会新建轨迹；
+        # 在移动模糊场景下，目标可能整段时间置信度都低于 det_thresh，导致永远没有 track_id。
+        # 这里允许用低分框启动新轨迹（但仍保留 det_thresh 用于“优先高分建轨”）。
+        # 注意：这会略微增加误检轨迹数量，但下游有 stable_T/迟滞与二维码格式校验作过滤。
+        if dets.shape[0] == 0 and dets_second.shape[0] > 0:
+            dets = dets_second
+            dets_second = np.empty((0, dets.shape[1]), dtype=dets.dtype)
 
         # get predicted locations from existing trackers.
         trks = np.zeros((len(self.trackers), 5))
@@ -297,6 +347,7 @@ class OCSort(object):
             Second round of associaton by OCR
         """
         # BYTE association
+        used_second_det_idx = set()
         if self.use_byte and len(dets_second) > 0 and unmatched_trks.shape[0] > 0:
             u_trks = trks[unmatched_trks]
             iou_left = self.asso_func(
@@ -318,6 +369,7 @@ class OCSort(object):
                     self.trackers[trk_ind].update(
                         dets_second[det_ind, :5], dets_second[det_ind, 5], dets_second[det_ind, 6]
                     )
+                    used_second_det_idx.add(int(det_ind))
                     to_remove_trk_indices.append(trk_ind)
                 unmatched_trks = np.setdiff1d(
                     unmatched_trks, np.array(to_remove_trk_indices)
@@ -358,6 +410,41 @@ class OCSort(object):
         for i in unmatched_dets:
             trk = KalmanBoxTracker(dets[i, :5], dets[i, 5], dets[i, 6], delta_t=self.delta_t)
             self.trackers.append(trk)
+
+        # 允许“中低分框”在未能关联到任何现有轨迹时也能启动新轨迹（解决移动模糊/短驻留导致无法产生 track_id）
+        # 仅对 score 较接近 det_thresh 的框启用，避免低分噪声大量建轨。
+        if self.use_byte and dets_second is not None and len(dets_second) > 0:
+            try:
+                low_th = float(getattr(self, "low_thresh", 0.1) or 0.1)
+            except Exception:
+                low_th = 0.1
+            try:
+                # 0.6 倍 det_thresh：更偏向“召回优先”，用于移动模糊场景下的短驻留新目标建轨
+                conf_new = max(low_th, float(self.det_thresh) * 0.60)
+            except Exception:
+                conf_new = max(low_th, 0.1)
+            min_area = 400  # 20x20，过小基本是噪声/不稳定框
+            try:
+                for j in range(len(dets_second)):
+                    if int(j) in used_second_det_idx:
+                        continue
+                    try:
+                        score = float(dets_second[j, 4])
+                    except Exception:
+                        continue
+                    if score < conf_new:
+                        continue
+                    x1, y1, x2, y2 = dets_second[j, 0], dets_second[j, 1], dets_second[j, 2], dets_second[j, 3]
+                    try:
+                        if float((x2 - x1) * (y2 - y1)) < float(min_area):
+                            continue
+                    except Exception:
+                        pass
+                    trk = KalmanBoxTracker(dets_second[j, :5], dets_second[j, 5], dets_second[j, 6], delta_t=self.delta_t)
+                    self.trackers.append(trk)
+            except Exception:
+                # 低分建轨失败不影响主流程
+                pass
         i = len(self.trackers)
         for trk in reversed(self.trackers):
             if trk.last_observation.sum() < 0:

@@ -6,7 +6,16 @@ import torch
 import numpy as np
 import cv2
 from torch.nn.functional import interpolate
-import pynvml
+import warnings
+try:
+    # `pynvml`（deprecated）与 `nvidia-ml-py`（recommended）在导入名上都是 `pynvml`。
+    # 一些环境会把包安装到用户级 site-packages（AppData/Roaming），并可能被上层代码禁用 usersite。
+    # 因此这里做“可选依赖”处理：缺失时不影响主流程，仅禁用 NVML 监控功能。
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        import pynvml  # type: ignore
+except Exception:
+    pynvml = None
 import threading
 import time
 from contextlib import contextmanager
@@ -24,13 +33,17 @@ class GPUManager:
         self.memory_pool = None
         self._lock = threading.Lock()
 
-        # 初始化NVML
-        try:
-            pynvml.nvmlInit()
-            self.nvml_available = True
-            self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        except:
-            self.nvml_available = False
+        # 初始化NVML（可选）
+        self.nvml_available = False
+        self.gpu_handle = None
+        if pynvml is not None:
+            try:
+                pynvml.nvmlInit()
+                self.nvml_available = True
+                self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            except Exception:
+                self.nvml_available = False
+                self.gpu_handle = None
 
         self._initialize_gpu()
 
@@ -91,7 +104,7 @@ class GPUManager:
 
     def get_memory_info(self):
         """获取GPU内存信息"""
-        if self.nvml_available:
+        if self.nvml_available and pynvml is not None and self.gpu_handle is not None:
             info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
             return {
                 'total': info.total / 1024 ** 3,
@@ -109,7 +122,7 @@ class GPUManager:
 
     def get_gpu_utilization(self):
         """获取GPU利用率"""
-        if self.nvml_available:
+        if self.nvml_available and pynvml is not None and self.gpu_handle is not None:
             util = pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle)
             return util.gpu
         return -1

@@ -5,43 +5,156 @@ deviceId: hn_xy_device_0001  # 设备号
 picture_save_path: data/cameraData  # 采集模式下保存位置
 picture_recognition_path: output  # 检测模式下存储位置
 upload_interval: 100  # 本地简单判断，小于100s内重复上传默认不上传
-modelPath: D:\Developer_tools\PycharmProjects\duck_egg_record-master\resources\best.pt
+#modelPath: D:\Developer_tools\PycharmProjects\record-eggs-second-main\runs\detect\eggs_finetune_beijing_qregg_cam0\weights\best.pt
+modelPath: resources/best2.pt
 tracking_config: configs\ocsort.yaml
-imgsz: 448
-conf: 0.5
-iou: 0.7
-width: 640  # 没有使用，已经修改为自动设置
-height: 480  # 没有使用，已经修改为自动设置
+# 推理尺寸（相机更近、蛋/二维码在画面中变大时的适配）：
+# - imgsz 越小：推理更快、目标在特征图上更“接近训练尺度”，对“近距离大目标”更友好
+# - imgsz 越大：对远距离小目标更友好，但会显著降低FPS（移动时更容易漏检）
+# 你当前描述“蛋占画面 10%~20% 且近距离”，优先使用 448（接近你原训练/部署尺度）。
+imgsz: 768
+# 新场景外观/颜色变化时，建议把 conf 先降到 0.1~0.2 以减少漏检；
+# 配合 configs/ocsort.yaml 的 det_thresh=0.3，可让 0.1~0.3 的低分框用于“补跟踪”（不新建轨迹），整体更稳。
+# 低速抖动场景：适当回升 conf 到 0.15，减少因光影晃动产生的误检。
+# 画面较暗场景：回退 conf 到 0.1，避免漏检。
+# 置信度阈值：
+# - 为了“移动中不漏检”，建议降低到 0.05，让 0.05~det_thresh 的低分框进入跟踪器做“补跟踪/保ID”
+# - 后续通过 stable_T/迟滞/二维码格式校验过滤误检
+conf: 0.2
+iou: 0.4
+
+width: 1280  # 没有使用，已经修改为自动设置
+height: 720  # 没有使用，已经修改为自动设置
 match_center: 320  # 没有使用，已经修改为自动设置
 match_range: 290  # 没有使用，已经修改为自动设置
 video: 0
-demo_video: D:\Developer_tools\PycharmProjects\duckEggData\MOT\demo.mp4
+demo_video: 
+video_file: #D:\Developer_tools\PycharmProjects\record-eggs-second-main\data\capture_six\camera_0\20251217_174000.mp4
+
+# 文件视频源播放控制（仅对 video_file 生效；真实USB摄像头不受影响）
+video_loop: true          # true=播完从头循环；false=播完停止读帧（不再反复重连）
+video_playback_fps: 0     # 0=使用视频自身FPS；>0=按指定FPS播放（例如 15）
 MQTT_broker_address: localhost
 MQTT_port: 3306
 MQTT_keepalive: 60
-# 固定为3个摄像头
-camera_count: 3
+# 默认4个摄像头（左上、左下、右上、右下）
+camera_count: 4
+
+# 左侧显示模式：
+# - camera：显示实时摄像头画面（旧模式）
+# - progress：不显示画面，改为“笼位进度条方块”（新模式，客户不看画面时使用）
+ui_left_panel_mode: progress
+
+# 进度条模式参数（每列）
+progress_total_slots: 190   # 每列笼位总数（38组*5）
+progress_page_size: 5       # 当页显示数量（自动自下往上翻页）
+progress_square_px: 60      # 小方块边长(px) - 原来的2倍
+progress_cell_gap: 35       # 方块之间的垂直间距(px) - 原来的2倍
+# 笼位序号映射方式：
+# - auto：优先从 cage_id 解析 1..N 的数字；解析不到则按出现顺序编号
+# - number：只按 cage_id 数字映射（解析不到则不推进）
+# - sequence：完全按出现顺序编号
+progress_index_mode: sequence
+
+# 是否在后台异步预热YOLO，避免启动等待
+warmup_async: true
 
 camera_0:
-  video: 0
+  device_path: '@device_pnp_\\?\usb#vid_32e4&pid_15b1&mi_00#7&788908c&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global'
+  video_file: #G:\record-eggs-second-main\data\capture\camera_0\data1.mp4
   backend: 700  # DirectShow
-  width: 640
-  height: 480
-  fps: 0.0
+  width: 1280
+  height: 720
+  fps: 25.0
   table: duckdata1
+  display_name: 左上
 
 camera_1:
-  video: 1
+  device_path: '@device_pnp_\\?\usb#vid_32e4&pid_15b1&mi_00#7&1951e041&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global'
+  video_file: #D:\Developer_tools\PycharmProjects\record-eggs-second-main\data\capture\camera_2\data1.mp4
   backend: 700  # DirectShow
-  width: 640
-  height: 480
-  fps: 0.0
+  width: 1280
+  height: 720
+  fps: 25.0
+  #preprocess_gamma: 1.7   下层摄像头单独提亮
   table: duckdata2
+  display_name: 左下
 
 camera_2:
-  video: 2
+  device_path: '@device_pnp_\\?\usb#vid_32e4&pid_15b1&mi_00#7&1cc0e2d6&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global'
+  video_file: #D:\Developer_tools\PycharmProjects\record-eggs-second-main\data\capture\camera_2\data1.mp4
   backend: 700  # DirectShow
-  width: 640
-  height: 480
-  fps: 0.0
+  width: 1280
+  height: 720
+  fps: 25.0
   table: duckdata3
+  display_name: 右上
+
+camera_3:
+  device_path: '@device_pnp_\\?\usb#vid_32e4&pid_15b1&mi_00#7&15e42829&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global'
+  video_file: #D:\Developer_tools\PycharmProjects\record-eggs-second-main\data\capture\camera_2\data1.mp4
+  backend: 700  # DirectShow
+  width: 1280
+  height: 720
+  fps: 25.0
+  #preprocess_gamma: 1.7  # 下层摄像头单独提亮
+  table: duckdata4
+  display_name: 右下
+
+# 导航服务配置
+nav_base_url: http://192.168.22.126:18000
+nav_map_name: wenshi_10
+
+# 匹配与稳定性参数（新增）
+matching:
+  alpha_x: 0.65           # 自适应横向阈值比例 |cx_egg-cx_qr| ≤ alpha_x * S_px
+  beta_edge: 0.06          # 走廊边界忽略比例（距离分界 < beta_edge * S_px 的蛋忽略）
+  # 低速抖动场景优化：
+  # switch_n: 调大到 6。车速慢时间充裕，增加滞后以抵抗边缘抖动导致的归属闪烁。
+  # stable_T: 调大到 8。更严格的稳定时间，过滤颠簸产生的重影/误检。
+  switch_n: 6               # 切换滞后：连续N帧优势满足才切换笼位
+  switch_margin_ratio: 0.2 # 切换所需优势（margin = ratio * S_px）
+  stable_T: 6              # 计数所需的稳定帧数阈值
+  lock_T: 3                # 提前锁定阈值（稳定帧达到该值就锁定，减少重复匹配）
+  switch_requires_prev_missing: true  # 上一个二维码仍在画面时不切换，避免重复匹配
+  egg_detect_min_conf: 0.2  # 蛋检测过滤阈值（降低误检，不影响二维码）
+  egg_min_conf: 0.2         # 蛋计数置信度阈值（过滤误检，影响最终计数）
+  force_stable_T: 3         # 停止巡检时的最低稳定帧要求
+  switch_min_ratio: 0.7     # 新二维码明显更近时允许切换
+  use_force_on_timeout: true # 超时汇总时使用更低稳定阈值
+  vertical_roi:            # 垂直几何约束
+    enabled: true
+    qr_offset_ratio: 0.2   # 下方起始= y_qr_center + 0.2 * H_qr
+    bottom_ratio: 0.95     # 底部= frame_h * 0.95
+
+# 二维码解码配置（增强）
+qr_decode:
+  use_async: true
+  max_workers: 2
+  global_interval_ms: 150    # 全局解码间隔（原250，调低以增加尝试频率）
+  try_interval_ms: 400       # 单track重试间隔（原600）
+  max_tries: 50              # 最大尝试次数（原30）
+  min_box_size: 80            # 最小可解边长
+  target_min_side: 400       # 放大基准（原360）
+  scales: [1.2, 1.5, 2.0]    # 增加放大尺度尝试
+  debug_save: false          # 关闭失败图片保存，减少IO抖动
+  debug_dir: output/qr_debug # 失败图片保存路径
+  early_decode_enabled: true
+  early_decode_interval_ms: 700   # 早期解码频率（减少每帧解码造成的卡顿）
+  early_decode_min_box_size: 100   # 太小的二维码不做早期解码
+  early_decode_max_per_frame: 3   # 每帧最多解码的二维码数量
+  early_decode_success_ttl_s: 90  # 同一二维码成功后短时间不重复解码
+  qr_filter_enabled: true         # 仅保留画面上方二维码
+  qr_top_ratio: 0.40              # 画面上方占比(0~1)，越小越“靠上”
+  qr_keep_seconds: 0.4            # 二维码短暂丢检保活时间（秒）
+
+# 图像预处理（可选）：用于新场景光照/颜色偏移，提高检出与跟踪稳定性
+# preprocess:
+#   enabled: true   # 开启预处理
+#   gamma: 1.3      # 稍微提亮（原1.2），针对下方摄像头较暗的情况进一步优化
+#   clahe:
+#     enabled: true # 开启CLAHE增强局部对比度
+#     clipLimit: 2.0
+#     tileGridSize: 8
+#   awb: false
+#   sharpen: true   # 开启锐化

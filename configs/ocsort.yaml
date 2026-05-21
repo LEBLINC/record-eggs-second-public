@@ -1,11 +1,27 @@
 # Trial number:      137
 # HOTA, MOTA, IDF1:  [55.567]
 asso_func: giou
-conf_thres: 0.5122620708221085
+# 降低高分阈值：让运动模糊导致的低分检测框也能被关联上
+conf_thres: 0.25
 delta_t: 3
-det_thresh: 0
-inertia: 0.2
+# 关键：OC-SORT 的 BYTE 二次关联需要 det_thresh > 0.1 才会启用低置信度框的“补跟踪”
+# 建议与 YOLOTrack.conf 搭配：
+# - YOLOTrack.conf 设为 0.1（放行低置信度检测）
+# - det_thresh 设为 0.15~0.25（>det_thresh 用于新建轨迹；0.1~det_thresh 仅用于补跟踪，不新建轨迹）
+# 说明：你当前视频里 egg/qr 的置信度经常低于 0.3，若 det_thresh 太高会导致“有检测但没有track_id”，下游就看不到egg。
+det_thresh: 0.15
+# 低分阈值（原实现写死为0.1）：移动模糊下置信度可能掉到0.05~0.1，因此做成可配置
+low_thresh: 0.05
+# 增加惯性：让运动预测权重更高，减少因检测丢失导致的轨迹中断
+# 针对低速抖动场景优化：降低惯性。
+# 抖动是随机高频运动，高惯性会导致跟踪框在抖动瞬间“甩出去/漂移”，低惯性让框更紧贴检测结果。
+inertia: 0.30
 iou_thresh: 0.1
+# 减少最大寿命：避免过期的轨迹干扰新检测
 max_age: 30
+# 减少最小命中：让新目标更快被确认
 min_hits: 1
 use_byte: True
+
+# 边缘框过滤比例（0=不启用；默认0.05表示左右各过滤 5% 宽度内的框）
+edge_filter_ratio: 0.02

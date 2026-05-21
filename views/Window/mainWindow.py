@@ -6,12 +6,13 @@
     @file： MainWindow.py
     @date：2024/5/15 9:52
 """
-from PyQt5.QtWidgets import QMainWindow, QStackedLayout, QWidget, QMessageBox
+from PyQt5.QtWidgets import QMainWindow, QStackedLayout, QWidget, QMessageBox, QStackedWidget
 from views.Label.mainLabel import MainLabel
 from views.Label.configLabel import ConfigLabel
 from views.Label.multiCameraDetectLabel import MultiCameraDetectLabel
 from PyQt5.QtCore import pyqtSlot
 from model.utils.getUSB import get_usb_drive_paths
+from views.Label.navigationLabel import NavigationLabel
 
 
 class MainWindow(QMainWindow):
@@ -20,68 +21,81 @@ class MainWindow(QMainWindow):
         self.app = app
         self.cfg = cfg
 
-        # 创建主窗口的中心部件
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # 使用 QStackedWidget 管理多个界面
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
 
-        # 创建主窗口的布局
-        self.stackedLayout = QStackedLayout(central_widget)
+        # 多摄像头检测界面
+        self.detectLabel = MultiCameraDetectLabel(self, cfg)
+        self.detectLabel.exitDetectSignal.connect(self.show_navigation)
+        self.detectLabel.startNavigationSignal.connect(self.start_navigation_from_detection)
+        self.detectLabel.returnChargingSignal.connect(self.return_to_charge_from_detection)
+        self.stack.addWidget(self.detectLabel)
 
-        # 创建三个主要界面
-        self.mainLabel = MainLabel(self)
-        self.configLabel = ConfigLabel(self, cfg)
-        self.detectLabel = MultiCameraDetectLabel(self, cfg)  # 使用多摄像头检测界面
+        # 导航界面
+        self.navigationLabel = NavigationLabel(self, cfg)
+        self.navigationLabel.backToDetectSignal.connect(self.show_detect)
+        self.navigationLabel.patrolCompletedSignal.connect(self.stop_detection_after_patrol)
+        self.stack.addWidget(self.navigationLabel)
 
-        # 连接信号
-        self.mainLabel.showConfigSignal.connect(self.showConfigPage)
-        self.mainLabel.showDetectSignal.connect(self.showDetectPage)
-        self.configLabel.finishConfigSignal.connect(self.finishConfigPage)
-        self.detectLabel.exitDetectSignal.connect(self.exitDetectPage)
-
-        # 添加界面到堆叠布局
-        self.stackedLayout.addWidget(self.mainLabel)
-        self.stackedLayout.addWidget(self.configLabel)
-        self.stackedLayout.addWidget(self.detectLabel)
+        # 默认显示检测界面
+        self.stack.setCurrentWidget(self.detectLabel)
 
         self.initUI()
 
     def initUI(self):
         """初始化UI"""
-        self.setWindowTitle("多摄像头笼养蛋鸭产蛋记录系统")
-        self.setFixedSize(1200, 800)  # 增大窗口尺寸以容纳多摄像头显示
-        self.showMainPage()
-
-    def showMainPage(self):
-        """显示主页"""
-        self.stackedLayout.setCurrentIndex(0)
-
-    @pyqtSlot()
-    def showConfigPage(self):
-        """显示配置页面"""
-        self.stackedLayout.setCurrentIndex(1)
-
-    @pyqtSlot()
-    def exitDetectPage(self):
-        """退出检测页面，返回主页"""
-        self.stackedLayout.setCurrentIndex(0)
+        self.setWindowTitle("笼养种鸭产蛋记录系统")
+        # 适配 1280x800 显示器布局
+        self.resize(1280, 800)
+        
+        # 设置窗口背景色
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #F7F7FA;
+            }
+        """)
+        
+        # 运行后自动最大化，保留标题栏和窗口控制按钮
+        self.showMaximized()
 
     @pyqtSlot()
-    def showDetectPage(self):
-        """显示检测页面"""
-        # 检查采集模式下是否有U盘连接
-        if self.cfg['mode'] == 1:
-            usb_paths = get_usb_drive_paths()
-            if not usb_paths:
-                QMessageBox.information(self, "提示", '检测不到U盘，请先插入U盘')
+    def show_navigation(self):
+        if hasattr(self, 'stack') and hasattr(self, 'navigationLabel'):
+            self.stack.setCurrentWidget(self.navigationLabel)
+
+    @pyqtSlot()
+    def return_to_charge_from_detection(self):
+        if hasattr(self, 'navigationLabel'):
+            self.navigationLabel.on_single_navigate("initPoint", "返回充电点")
+
+    @pyqtSlot()
+    def start_navigation_from_detection(self):
+        if hasattr(self, 'stack') and hasattr(self, 'navigationLabel'):
+            if self.navigationLabel.patrol_thread and self.navigationLabel.patrol_thread.isRunning():
                 return
-            # 更新U盘路径
-            self.cfg['picture_save_path'] = usb_paths[0]
-
-        # 显示检测页面
-        self.stackedLayout.setCurrentIndex(2)
+            self.stack.setCurrentWidget(self.navigationLabel)
+            self.navigationLabel.on_start_patrol()
 
     @pyqtSlot()
-    def finishConfigPage(self):
-        """完成配置，返回主页"""
-        QMessageBox.information(self, "提示", "配置已保存！")
-        self.stackedLayout.setCurrentIndex(0)
+    def stop_detection_after_patrol(self):
+        if hasattr(self, 'detectLabel') and getattr(self.detectLabel, 'detection_started', False):
+            self.detectLabel._skip_return_after_stop = True
+            self.detectLabel.stop_video()
+
+    @pyqtSlot()
+    def show_detect(self):
+        if hasattr(self, 'stack') and hasattr(self, 'detectLabel'):
+            self.stack.setCurrentWidget(self.detectLabel)
+
+    def closeEvent(self, event):
+        """主窗口关闭事件处理"""
+        # 停止检测界面线程
+        if hasattr(self, 'detectLabel'):
+            self.detectLabel.exit_detect()
+        
+        # 停止导航界面线程
+        if hasattr(self, 'navigationLabel'):
+            self.navigationLabel.close_threads()
+            
+        event.accept()

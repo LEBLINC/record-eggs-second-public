@@ -11,6 +11,11 @@ from PyQt5.QtGui import QPixmap, QIcon
 from model.QTInterface import Interface
 from model.QTCapture import CaptureInterface
 import os
+from model.utils.path_utils import resource_path
+
+
+def _res(name: str) -> str:
+    return resource_path("resources", name)
 
 
 class DetectLabel(QWidget):
@@ -55,11 +60,11 @@ class DetectLabel(QWidget):
         self.button_layout.addWidget(self.button5)
 
         # 创建图标和文本的垂直布局
-        self.addIconAndText(self.button1, QIcon("resources/flight.png"), "开始检测")
-        self.addIconAndText(self.button2, QIcon("resources/pause-one.svg"), "暂停检测")
-        self.addIconAndText(self.button3, QIcon("resources/undo.svg"), "恢复检测")
-        self.addIconAndText(self.button4, QIcon("resources/clear-format.svg"), "停止检测")
-        self.addIconAndText(self.button5, QIcon("resources/logout.png"), "退出界面")
+        self.addIconAndText(self.button1, QIcon(_res("flight.png")), "开始检测")
+        self.addIconAndText(self.button2, QIcon(_res("pause-one.svg")), "暂停检测")
+        self.addIconAndText(self.button3, QIcon(_res("undo.svg")), "恢复检测")
+        self.addIconAndText(self.button4, QIcon(_res("clear-format.svg")), "停止检测")
+        self.addIconAndText(self.button5, QIcon(_res("logout.png")), "退出界面")
 
         # 将 QLabel 和按钮垂直布局放置在 hbox_layout 中
         hbox_layout.addLayout(self.button_layout)

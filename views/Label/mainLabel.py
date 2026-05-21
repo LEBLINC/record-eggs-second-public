@@ -11,6 +11,11 @@ from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QPixmap, QPainter, QIcon
 from ..utils.getUSB import get_mounted_usb_paths
 from ..utils.getUSB import get_usb_drive_paths
+from model.utils.path_utils import resource_path
+
+
+def _res(name: str) -> str:
+    return resource_path("resources", name)
 
 
 class MainLabel(QWidget):
@@ -20,7 +25,7 @@ class MainLabel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent = parent
-        self.background_image = QPixmap("resources/back.png")
+        self.background_image = QPixmap(_res("back.png"))
         self.initUI()
 
     def initUI(self):
@@ -37,9 +42,9 @@ class MainLabel(QWidget):
         button2.clicked.connect(self.showUSB)
 
         # 创建图标和文本的垂直布局
-        self.addIconAndText(button1, QIcon("resources/flight.png"), "开始巡检")
-        self.addIconAndText(button2, QIcon("resources/inspection.png"), "环境检查")
-        self.addIconAndText(button3, QIcon("resources/config.png"), "设置")
+        self.addIconAndText(button1, QIcon(_res("flight.png")), "开始巡检")
+        self.addIconAndText(button2, QIcon(_res("inspection.png")), "环境检查")
+        self.addIconAndText(button3, QIcon(_res("config.png")), "设置")
 
         # 将按钮添加到布局中
         layout.addWidget(button2)

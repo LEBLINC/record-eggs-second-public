@@ -1,12 +1,81 @@
-output/
-# === ignore ===
+# ── Python ──
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ── 虚拟环境 ──
+venv/
+.venv/
+env/
+ENV/
+training_env/
+# training/env/ 是配置文档目录，需要入库
+!training/env/
+!training/env/**
+
+# ── 视频/图片/大型媒体 ──
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+*.flv
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+# 如果有少量图片确实要入库（比如文档截图），可以用 !path/to/file.png 排除
+
+# ── 模型权重 ──
+*.pt
+*.pth
+*.onnx
+*.trt
+*.engine
+pretrained_weights/
+
+# ── 训练产物 ──
+work_dirs/
+training/work_dirs/
+training/mmdeploy-1.3.1/
+training/mmdeploy_download/
+
+# ── 数据集 ──
+data/
+
+# ── 日志 ──
 logs/
 *.log
-.idea/
-*.mp4
-duckEggData/
 
-__pycache__/
-*.pyc
+# ── 输出 ──
+output/
+output_test/
+recognition_output/
+test_recognition_output/
+
+# ── 打包 / 构建 ──
+build/
+dist/
+*.spec
+*.exe
+
+# ── 缓存 ──
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.tmp
+*.bak
+
+# ── IDE / 系统 ──
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+test_camera.jpg

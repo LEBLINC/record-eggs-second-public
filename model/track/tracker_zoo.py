@@ -30,8 +30,19 @@ def on_predict_start(predictor, persist=False, tracking_config="ocsort.yaml"):
 
 
 def create_tracker(tracker_config, per_class):
-    with open(tracker_config, "r") as f:
-        cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
+    # Windows 默认编码可能为 GBK，而配置文件通常为 UTF-8；这里做自适应解码，避免报错
+    with open(tracker_config, "rb") as f:
+        raw = f.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("gbk")
+        except UnicodeDecodeError:
+            # 最后兜底：替换不可解码字符（一般仅出现在注释里，不影响YAML键值解析）
+            text = raw.decode("utf-8", errors="replace")
+
+    cfg = yaml.load(text, Loader=yaml.FullLoader)
     cfg = SimpleNamespace(**cfg)  # easier dict acces by dot, instead of ['']
 
     from ..track.ocsort import OCSort
@@ -45,5 +56,7 @@ def create_tracker(tracker_config, per_class):
         asso_func=cfg.asso_func,
         inertia=cfg.inertia,
         use_byte=cfg.use_byte,
+        low_thresh=getattr(cfg, "low_thresh", 0.1),
+        edge_filter_ratio=getattr(cfg, "edge_filter_ratio", 0.05),
     )
     return ocsort

@@ -63,8 +63,8 @@ dependencies:
     - mpmath==1.3.0
     - networkx==3.2.1
     - numpy==1.24.3
+    # 重要：不要同时安装 opencv-python 与 opencv-contrib-python（会互相覆盖，导致 wechat_qrcode 等 contrib 模块缺失）。
     - opencv-contrib-python==4.11.0.86
-    - opencv-python==4.11.0.86
     - pandas==2.2.3
     - pillow==11.0.0
     - psutil==7.0.0
