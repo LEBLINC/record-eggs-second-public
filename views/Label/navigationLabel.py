@@ -244,6 +244,76 @@ class SingleTargetThread(QThread):
         return False
 
 
+class _StartCheckThread(QThread):
+    """后台执行"设置空闲 + 检查位置 + 初始化"，避免阻塞 UI 线程。"""
+    resultSignal = pyqtSignal(bool, str)   # (ok, message)
+    logSignal = pyqtSignal(str)
+
+    def __init__(self, base_url, map_name, parent=None):
+        super().__init__(parent)
+        self.base_url = base_url
+        self.map_name = map_name
+
+    def run(self):
+        client = NavigateClient(self.base_url, self.map_name)
+
+        # 1. 设置空闲状态（超时缩短到 3 秒，失败了也继续）
+        try:
+            code, data, _ = client.navigate_set_idle(timeout=3)
+            self.logSignal.emit(f"设置导航空闲状态: code={code}, data={data}")
+        except Exception as e:
+            self.logSignal.emit(f"设置空闲状态异常（忽略）: {e}")
+
+        # 2. 检查机器人位置（每次超时 3 秒，重试 3 次）
+        last_data = None
+        pos_ok = False
+        for i in range(3):
+            try:
+                code, data, _ = client.get_robot_position(timeout=3)
+                last_data = data
+                self.logSignal.emit(f"获取机器人位置[{i+1}/3]: code={code}, data={data}")
+                if code == 200 and self._is_near_start_pos(data):
+                    pos_ok = True
+                    break
+            except Exception as e:
+                self.logSignal.emit(f"获取位置异常: {e}")
+            if i < 2:
+                import time; time.sleep(0.2)
+
+        if not pos_ok:
+            self.resultSignal.emit(False, f"机器人不在起始区域，未启动巡航。最后位置={last_data}")
+            return
+
+        # 3. 初始化位置
+        self.logSignal.emit("开始巡航前初始化位置 (initPoint)...")
+        try:
+            code, data, _ = client.initialize_directly_point("initPoint", timeout=5)
+            self.logSignal.emit(f"初始化返回: code={code}, data={data}")
+            if code != 200 or not client.is_success_response(data):
+                self.resultSignal.emit(False, "初始化失败，未启动巡航。")
+                return
+        except Exception as e:
+            self.resultSignal.emit(False, f"初始化异常，未启动巡航: {e}")
+            return
+
+        self.resultSignal.emit(True, "导航状态检查通过，正在启动巡航...")
+
+    def _is_near_start_pos(self, data):
+        try:
+            if not isinstance(data, dict):
+                return False
+            inner = data.get("data", {})
+            pos = inner.get("position", {})
+            wx = float(pos.get("wx"))
+            wy = float(pos.get("wy"))
+            yaw = float(pos.get("yaw"))
+        except Exception:
+            return False
+        target_wx, target_wy, target_yaw = -0.7137, 4.9743, -3.0829
+        return (abs(wx - target_wx) <= 0.5 and abs(wy - target_wy) <= 0.5 and
+                abs(abs(yaw - target_yaw) % (2 * 3.14159) - 3.14159) <= 0.5)
+
+
 class NavigationLabel(QWidget):
     backToDetectSignal = pyqtSignal()
     patrolCompletedSignal = pyqtSignal()
@@ -431,29 +501,26 @@ class NavigationLabel(QWidget):
             self.append_log("巡航任务已在执行中，忽略重复启动。")
             return
 
-        # 先终止可能存在的任务，并设置空闲
-        self._force_stop_threads()
-        client = NavigateClient(self.base_url, self.map_name)
-        code, data, raw = client.navigate_set_idle()
-        self.append_log(f"设置导航空闲状态: code={code}, data={data}")
+        # 禁用按钮，防止重复点击
+        self.btn_start.setEnabled(False)
+        self.append_log("正在检查导航状态，请稍候...")
 
-        # 获取机器人位置并判断是否在指定范围内
-        ok, data = self._check_start_pos_with_retry(client)
+        # 将所有阻塞网络操作放到后台线程，避免 UI 卡死
+        self._start_check_thread = _StartCheckThread(self.base_url, self.map_name, self)
+        self._start_check_thread.resultSignal.connect(self._on_start_check_result)
+        self._start_check_thread.logSignal.connect(self.append_log)
+        self._start_check_thread.start()
+
+    def _on_start_check_result(self, ok: bool, msg: str):
+        """后台检查完成后，在 UI 线程里做最终判断"""
+        self.btn_start.setEnabled(True)
+        self.append_log(msg)
         if not ok:
-            QMessageBox.information(self, "提示", "机器人不在起始区域，未启动巡航。")
-            self.append_log(f"机器人位置不在起始范围内，取消开始巡航。最后一次位置={data}")
+            QMessageBox.information(self, "提示", msg)
             return
 
-        # 在原有巡航流程前，先初始化位置
-        self.append_log("开始巡航前初始化位置 (initPoint)...")
-        code, data, raw = client.initialize_directly_point("initPoint")
-        self.append_log(f"初始化返回: code={code}, data={data}")
-        if code != 200 or not client.is_success_response(data):
-            QMessageBox.information(self, "提示", "初始化失败，未启动巡航。")
-            self.append_log("初始化失败，取消开始巡航。")
-            return
-
-        # 位置正常，执行原有巡航流程
+        # 检查通过，启动巡航线程
+        self._force_stop_threads()
         self.patrol_thread = PatrolThread(self.base_url, self.map_name, self)
         self.patrol_thread.logSignal.connect(self.append_log)
         self.patrol_thread.completedSignal.connect(self._on_patrol_completed)

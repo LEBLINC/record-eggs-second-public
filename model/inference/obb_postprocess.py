@@ -300,8 +300,10 @@ def obb_postprocess(
         cls_flat = cls.reshape(2, -1).T                    # (H*W, 2)
         cls_flat = 1.0 / (1.0 + np.exp(-cls_flat))        # sigmoid
 
-        # (4, H, W) → (H*W, 4), scale by stride
-        bbox_flat = bbox.reshape(4, -1).T * stride         # (H*W, 4)
+        # (4, H, W) → (H*W, 4)
+        # NOTE: The ONNX bbox output is already in pixel units (stride already baked in
+        # by the export). Do NOT multiply by stride again.
+        bbox_flat = bbox.reshape(4, -1).T                  # (H*W, 4)
 
         # (1, H, W) → (H*W, 1)
         ang_flat = ang.reshape(1, -1).T                    # (H*W, 1)

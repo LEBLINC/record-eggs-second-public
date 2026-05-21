@@ -351,24 +351,18 @@ def draw_rtmdet_detections(
             hbb = det.get('hbb')
             if hbb is not None and len(hbb) >= 4:
                 x1, y1, x2, y2 = int(hbb[0]), int(hbb[1]), int(hbb[2]), int(hbb[3])
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # valid_qr=绿色，invalid_qr=红色
+                color = (0, 255, 0) if det.get('class_id', 0) == 0 else (0, 0, 255)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 validity = det.get('validity_score', det.get('score', 0.0))
                 decode_id = det.get('decode_id') or det.get('cage_id')
                 if decode_id:
                     label = f"QR {decode_id} ({validity:.2f})"
                 else:
                     label = f"QR {validity:.2f}"
-                cv2.putText(frame, label, (x1, y1 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-            # 绘制旋转框（如果有）
-            rotated = det.get('rotated_box')
-            if rotated is not None and len(rotated) >= 5:
-                cx, cy, w, h, angle = rotated[:5]
-                rect = ((float(cx), float(cy)), (float(w), float(h)), float(angle))
-                box_pts = cv2.boxPoints(rect)
-                box_pts = _to_int_points(box_pts)
-                cv2.drawContours(frame, [box_pts], 0, (255, 165, 0), 2)
+                cv2.putText(frame, label, (x1, max(y1 - 5, 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # 不再单独绘制旋转框轮廓，避免双框视觉干扰
 
         # 绘制蛋边界框和中心点
         for det in egg_dets:

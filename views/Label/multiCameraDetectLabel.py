@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QHBoxLayout,
                              QTextEdit, QSplitter, QProgressBar, QFrame, QComboBox, QScrollArea, QDialog, QApplication,
                              QStackedLayout, QToolTip, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
                              QSizePolicy, QSpacerItem)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QEvent, QPoint, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QEvent, QPoint, pyqtProperty, QPropertyAnimation, QEasingCurve, QThread
 from PyQt5.QtGui import QPixmap, QIcon, QFont, QFontMetrics, QPalette, QPainter, QColor, QBrush, QPen
 import datetime
 from model.MultiCameraInterface import MultiCameraInterface
@@ -23,6 +23,24 @@ from model.utils.path_utils import resource_path
 
 def _res(name: str) -> str:
     return resource_path("resources", name)
+
+
+class _ProducerInitThread(QThread):
+    """后台线程：构造 MultiCameraInterface（加载模型、初始化摄像头），避免阻塞 UI。"""
+    succeeded = pyqtSignal(object)   # 传出构造好的 MultiCameraInterface 实例
+    failed = pyqtSignal(str)          # 传出错误信息
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self._config = config
+
+    def run(self):
+        try:
+            producer = MultiCameraInterface(self._config)
+            self.succeeded.emit(producer)
+        except Exception as e:
+            import traceback
+            self.failed.emit(f"{e}\n{traceback.format_exc()}")
 
 
 class CustomToolTip(QWidget):
@@ -1430,19 +1448,10 @@ class MultiCameraDetectLabel(QWidget):
 
     def _on_start_pause_clicked(self):
         """处理开始/暂停/恢复按钮的点击事件"""
-        # 如果检测从未启动过
+        # 如果检测从未启动过 —— 异步启动，按钮状态由 _finalize_start_video() 更新
         if not self.detection_started:
             self.start_video()
-            if self.frame_producer:  # 如果成功启动
-                self.detection_started = True
-                self.is_paused = False
-                self.start_pause_button.setText(" 暂停检测")
-                self.start_pause_button.setIcon(QIcon(_res("pause-one.svg")))
-                try:
-                    self.startNavigationSignal.emit()
-                except Exception as e:
-                    print(f"开始检测后启动导航失败: {e}")
-            return
+            return  # 后续状态由 _on_producer_ready -> _finalize_start_video 回调处理
 
         # 如果当前是暂停状态，则恢复
         if self.is_paused:
@@ -1772,11 +1781,8 @@ class MultiCameraDetectLabel(QWidget):
                 )
 
     def start_video(self):
-        """启动视频处理"""
+        """启动视频处理（异步初始化，避免 UI 卡死）"""
         try:
-            # self.set_button_color(self.start_button) # 暂时禁用
-            # self.add_log("开始启动视频处理...")
-
             if self.frame_producer is None:
                 if self.config['mode'] == 1:
                     from model.utils.getUSB import get_usb_drive_paths
@@ -1786,36 +1792,115 @@ class MultiCameraDetectLabel(QWidget):
                         return
                     self.config['picture_save_path'] = usb_paths[0]
 
-                self.frame_producer = MultiCameraInterface(self.config)
-                self.frame_producer.frames_generated.connect(self.update_frames)
-                self.frame_producer.detection_results_generated.connect(self._handle_detection_results)  # 连接新信号
-                self.frame_producer.egg_count_updated.connect(self._handle_egg_count_update)  # 连接蛋数更新信号
-
-                # 先切换到网格视图并更新，确保任务控件已创建，避免早期事件匹配失败
-                self.task_stack.setCurrentIndex(1)
-                self.update_task_grid(self.range_combo.currentText())
-                # 关键：全屏状态下“启动时切换Stack视图”不会触发 resizeEvent，主动激活布局避免底部一行被裁切
+                # 禁用按钮，防止重复点击
                 try:
-                    QTimer.singleShot(0, self._force_relayout_after_start)
+                    self.start_pause_button.setEnabled(False)
                 except Exception:
                     pass
 
-                # 进度条模式：启动前清空旧状态（灰色、回到第1组）
-                try:
-                    self._reset_progress_state()
-                except Exception:
-                    pass
+                # 加载提示对话框（不可关闭）
+                self._loading_dialog = QDialog(self)
+                self._loading_dialog.setWindowTitle("正在启动")
+                self._loading_dialog.setWindowFlags(
+                    Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
+                self._loading_dialog.setFixedSize(360, 110)
+                _dlg_layout = QVBoxLayout(self._loading_dialog)
+                self._loading_dot_idx = 0
+                self._loading_label = QLabel("正在启动检测系统，请稍候...")
+                self._loading_label.setAlignment(Qt.AlignCenter)
+                self._loading_label.setStyleSheet("font-size: 15px; color: #353F5E; font-weight: bold;")
+                _dlg_layout.addWidget(self._loading_label)
+                _sub = QLabel("正在加载 AI 模型，约需 15~30 秒，请勿操作")
+                _sub.setAlignment(Qt.AlignCenter)
+                _sub.setStyleSheet("font-size: 11px; color: #888;")
+                _dlg_layout.addWidget(_sub)
 
-                # 再启动后台线程
-                self.frame_producer.start()
-                self.start_time = time.time()
+                self._loading_timer = QTimer(self)
+                def _tick():
+                    self._loading_dot_idx = (self._loading_dot_idx + 1) % 3
+                    self._loading_label.setText(
+                        "正在启动检测系统，请稍候" + "." * (self._loading_dot_idx + 1))
+                self._loading_timer.timeout.connect(_tick)
+                self._loading_timer.start(500)
+                self._loading_dialog.show()
+                QApplication.processEvents()
+
+                # 后台线程构造 MultiCameraInterface，避免阻塞 UI
+                self._init_thread = _ProducerInitThread(self.config, self)
+                self._init_thread.succeeded.connect(self._on_producer_ready)
+                self._init_thread.failed.connect(self._on_producer_failed)
+                self._init_thread.start()
 
         except Exception as e:
             import traceback
-            error_msg = f"启动失败: {str(e)}"
             print(f"启动视频处理异常: {e}")
             traceback.print_exc()
-            QMessageBox.critical(self, "错误", error_msg)
+            QMessageBox.critical(self, "错误", f"启动失败: {e}")
+
+    def _on_producer_ready(self, producer):
+        """后台初始化成功，在 UI 线程完成信号连接和线程启动"""
+        try:
+            self._loading_timer.stop()
+            self._loading_dialog.close()
+        except Exception:
+            pass
+        try:
+            self.start_pause_button.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            self.frame_producer = producer
+            self.frame_producer.frames_generated.connect(self.update_frames)
+            self.frame_producer.detection_results_generated.connect(self._handle_detection_results)
+            self.frame_producer.egg_count_updated.connect(self._handle_egg_count_update)
+
+            self.task_stack.setCurrentIndex(1)
+            self.update_task_grid(self.range_combo.currentText())
+            try:
+                QTimer.singleShot(0, self._force_relayout_after_start)
+            except Exception:
+                pass
+            try:
+                self._reset_progress_state()
+            except Exception:
+                pass
+
+            self.frame_producer.start()
+            self.start_time = time.time()
+
+            # 完成启动后通知 _on_start_pause_clicked 更新按钮状态
+            self._finalize_start_video()
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "错误", f"启动失败: {e}")
+
+    def _on_producer_failed(self, error_msg):
+        """后台初始化失败"""
+        try:
+            self._loading_timer.stop()
+            self._loading_dialog.close()
+        except Exception:
+            pass
+        try:
+            self.start_pause_button.setEnabled(True)
+        except Exception:
+            pass
+        self.frame_producer = None
+        print(f"启动视频处理异常: {error_msg}")
+        QMessageBox.critical(self, "错误", f"启动失败:\n{error_msg[:300]}")
+
+    def _finalize_start_video(self):
+        """start_video 异步完成后的收尾：更新按钮文字和状态"""
+        try:
+            self.detection_started = True
+            self.is_paused = False
+            self.start_pause_button.setText(" 暂停检测")
+            self.start_pause_button.setIcon(QIcon(_res("pause-one.svg")))
+        except Exception:
+            pass
+
 
     def _force_relayout_after_start(self):
         """强制激活布局，修复全屏下首次切换任务队列视图的裁切问题。"""

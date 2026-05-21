@@ -71,6 +71,9 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def start_navigation_from_detection(self):
+        # 如果配置里明确设了 nav_auto_start: false，跳过自动导航（训练/调试机使用）
+        if not self.cfg.get('nav_auto_start', False):
+            return
         if hasattr(self, 'stack') and hasattr(self, 'navigationLabel'):
             if self.navigationLabel.patrol_thread and self.navigationLabel.patrol_thread.isRunning():
                 return

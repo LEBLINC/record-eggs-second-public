@@ -1089,8 +1089,9 @@ class MultiCameraTrackThread(BaseThread):
                     continue
 
                 try:
-                    # 关键修复：保证下游拿到的是“单帧 List[Results]”形态
-                    if not isinstance(track_results, (list, tuple)):
+                    # YOLO路径：保证下游拿到的是“单帧 List[Results]”形态
+                    # RTMDet路径：track() 返回 dict，直接传递，不需要包装
+                    if self.model_type != 'rtmdet' and not isinstance(track_results, (list, tuple)):
                         track_results = [track_results]
 
                     # 早期二维码直达UI（只对YOLO新帧触发）
@@ -1402,7 +1403,7 @@ class SingleCameraMatchThread(BaseThread):
             self.error_counts += 1
 
     def _process_rtmdet(self, frame, track_results):
-        """RTMDet 路径：使用 TopologyMatcher 进行蛋-笼匹配"""
+        """RTMDet 路径：QR解码 + TopologyMatcher 蛋-笼匹配，在帧上绘制检测框"""
         try:
             if not isinstance(track_results, dict):
                 self.result_queue.put((frame, []), block=False)
@@ -1412,9 +1413,20 @@ class SingleCameraMatchThread(BaseThread):
             egg_dets = track_results.get('egg_detections', [])
             match_results = []
 
+            # 对 QR 检测框做解码，填充 cage_id
+            self._decode_qr_boxes(frame, qr_dets)
+
+            # 在帧上绘制 RTMDet 检测结果
+            try:
+                from model.inference.pipeline_logic import draw_rtmdet_detections
+                annotated = frame.copy()
+                draw_rtmdet_detections(annotated, qr_dets, egg_dets)
+            except Exception:
+                annotated = frame
+
             if self.topology_matcher is not None and (qr_dets or egg_dets):
-                # 构建 egg_centers
                 egg_centers = []
+                egg_meta = []
                 for det in egg_dets:
                     center = det.get('center')
                     if center is not None:
@@ -1422,8 +1434,12 @@ class SingleCameraMatchThread(BaseThread):
                     else:
                         bbox = det.get('bbox', [0, 0, 0, 0])
                         egg_centers.append(((bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2))
+                    egg_meta.append({
+                        'class_id': det.get('class_id', 0),
+                        'is_invalid': det.get('class_id', 0) == 1,
+                        'score': det.get('score', 0.0),
+                    })
 
-                # 构建 tm_qr_dets
                 tm_qr_dets = []
                 for det in qr_dets:
                     hbb = det.get('hbb', [0, 0, 0, 0])
@@ -1436,10 +1452,14 @@ class SingleCameraMatchThread(BaseThread):
                         'validity_score': det.get('validity_score', det.get('score', 0.0)),
                         'score': det.get('score', 0.0),
                         'class_id': det.get('class_id', 0),
+                        'cage_id': det.get('cage_id'),       # 解码得到的笼位 ID
+                        'decode_id': det.get('cage_id'),     # TopologyMatcher 兼容字段
                     })
 
                 try:
-                    results = self.topology_matcher.match(egg_centers, tm_qr_dets, frame)
+                    results = self.topology_matcher.match(
+                        egg_centers, tm_qr_dets, annotated, egg_meta=egg_meta
+                    )
                     if results:
                         match_results = results if isinstance(results, list) else [results]
                 except Exception as e:
@@ -1447,17 +1467,81 @@ class SingleCameraMatchThread(BaseThread):
                     self.error_counts += 1
 
             try:
-                self.result_queue.put((frame, match_results), block=False)
+                self.result_queue.put((annotated, match_results), block=False)
             except queue.Full:
                 try:
                     self.result_queue.get(block=False)
-                    self.result_queue.put((frame, match_results), block=False)
+                    self.result_queue.put((annotated, match_results), block=False)
                 except (queue.Empty, queue.Full):
                     pass
 
         except Exception as e:
             print(f"摄像头 {self.camera_idx} RTMDet匹配异常: {e}")
             self.error_counts += 1
+
+    def _decode_qr_boxes(self, frame, qr_dets):
+        """对每个 QR 检测框裁剪区域并用 WeChatQRCode 解码，结果写入 det['cage_id']"""
+        if not qr_dets:
+            return
+        # 懒加载解码器（只初始化一次）
+        if not hasattr(self, '_wechat_detector'):
+            self._wechat_detector = None
+            try:
+                import cv2 as _cv2
+                if hasattr(_cv2, 'wechat_qrcode_WeChatQRCode'):
+                    wechat_dir = os.path.join(os.getcwd(), 'resources', 'wechat')
+                    det_proto = os.path.join(wechat_dir, 'detect.prototxt')
+                    det_model = os.path.join(wechat_dir, 'detect.caffemodel')
+                    sr_proto = os.path.join(wechat_dir, 'sr.prototxt')
+                    sr_model = os.path.join(wechat_dir, 'sr.caffemodel')
+                    if all(os.path.isfile(p) for p in [det_proto, det_model, sr_proto, sr_model]):
+                        self._wechat_detector = _cv2.wechat_qrcode_WeChatQRCode(
+                            det_proto, det_model, sr_proto, sr_model)
+                    else:
+                        self._wechat_detector = _cv2.wechat_qrcode_WeChatQRCode()
+                    print(f"[RTMDet] 摄像头{self.camera_idx} WeChatQRCode 加载成功")
+            except Exception as e:
+                print(f"[RTMDet] 摄像头{self.camera_idx} WeChatQRCode 初始化失败: {e}")
+
+        h, w = frame.shape[:2]
+        for det in qr_dets:
+            if det.get('cage_id'):
+                continue  # 已有解码结果，跳过
+            hbb = det.get('hbb')
+            if hbb is None:
+                continue
+            x1, y1, x2, y2 = int(hbb[0]), int(hbb[1]), int(hbb[2]), int(hbb[3])
+            # 加一点 padding
+            pad = 10
+            x1 = max(0, x1 - pad); y1 = max(0, y1 - pad)
+            x2 = min(w, x2 + pad); y2 = min(h, y2 + pad)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            # 尝试解码
+            text = None
+            try:
+                if self._wechat_detector is not None:
+                    texts, _ = self._wechat_detector.detectAndDecode(crop)
+                    if isinstance(texts, (list, tuple)):
+                        texts = [str(t).strip() for t in texts if t]
+                        if texts:
+                            text = texts[0]
+            except Exception:
+                pass
+            if not text:
+                try:
+                    import cv2 as _cv2
+                    res, _, _ = _cv2.QRCodeDetector().detectAndDecode(crop)
+                    if res and res.strip():
+                        text = res.strip()
+                except Exception:
+                    pass
+            if text:
+                det['cage_id'] = text
+                print(f"[RTMDet] 摄像头{self.camera_idx} 解码 QR: {text}")
 
 
 class MultiCameraMatchThread(BaseThread):
@@ -1802,6 +1886,9 @@ class MultiCameraInterface(QThread):
     @classmethod
     def preload_model_async(cls, cfg):
         """后台预加载YOLO模型，减少点击开始时的阻塞"""
+        # RTMDet 模式不需要预热 YOLO
+        if isinstance(cfg, dict) and cfg.get('model_type') == 'rtmdet':
+            return
         with cls._shared_model_lock:
             if cls._shared_model is not None or cls._shared_model_event.is_set():
                 return

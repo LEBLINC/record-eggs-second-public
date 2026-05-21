@@ -398,12 +398,20 @@ class RTMDetOBBInference:
         # 坐标逆变换：letterbox 空间 → 原始图像空间
         boxes_orig = self.preprocessor.inverse_transform_rotated_boxes(boxes_lbspace, meta)
 
-        # 组装结果
+        # 组装结果，过滤仍然异常大的框（w 或 h 超过原图对应维度的 80% 视为误检）
+        orig_h, orig_w = meta['orig_shape']
+        max_w = orig_w * 0.8
+        max_h = orig_h * 0.8
+
         results = []
         for i in range(len(boxes_orig)):
             cx, cy, w, h, angle = boxes_orig[i].tolist()
             cid   = int(class_ids[i])
             score = float(scores[i])
+
+            # 过滤超大异常框
+            if w > max_w or h > max_h:
+                continue
 
             x1, y1, x2, y2 = obb_to_hbb(cx, cy, w, h, angle)
 
@@ -500,11 +508,20 @@ class RTMDetOBBInference:
         boxes_orig = self.preprocessor.inverse_transform_rotated_boxes(boxes_lbspace, meta)
 
         # Assemble results — same dict format as (N,6) and (N,5+C) branches
+        # Filter out abnormally large boxes (w or h > 80% of original image dimension)
+        orig_h, orig_w = meta['orig_shape']
+        max_w = orig_w * 0.8
+        max_h = orig_h * 0.8
+
         results = []
         for i in range(len(boxes_orig)):
             cx, cy, w, h, angle = boxes_orig[i].tolist()
             cid = int(class_ids[i])
             score = float(scores[i])
+
+            # Filter oversized false positives
+            if w > max_w or h > max_h:
+                continue
 
             # HBB from rotated box (angle is in radians, obb_to_hbb expects degrees)
             angle_deg = float(np.degrees(angle))
