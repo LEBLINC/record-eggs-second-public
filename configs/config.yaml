@@ -1,4 +1,6 @@
 mode: 0 # 0：检测模式 1：数据采集模式 2：示范模式
+# 模型选择（核心开关）：'yolo' = 原有方案, 'rtmdet' = RTMDet 新方案
+model_type: yolo
 upload: True  # 是否上传,采集模式下不生效
 uploadUrl: http://8.138.181.75/leblinc_wenshi_eggCage/cageDuck/eggRecord/save   # 上传地址,采集模式下不生效
 deviceId: hn_xy_device_0001  # 设备号
@@ -104,6 +106,26 @@ camera_3:
 # 导航服务配置
 nav_base_url: http://192.168.22.126:18000
 nav_map_name: wenshi_10
+
+# RTMDet 模型参数（model_type=rtmdet 时生效）
+rtmdet:
+  obb_model: resources/rtmdet_obb_qrcode.onnx
+  ins_model: resources/rtmdet_ins_egg.onnx
+  imgsz: 640
+  conf: 0.5
+  iou: 0.5
+  validity_threshold: 0.7
+  use_fp16: false
+
+# 拓扑匹配参数（model_type=rtmdet 时生效）
+topology_matcher:
+  max_match_distance: 200
+  cost_weights:
+    position: 0.6
+    validity: 0.3
+    topology: 0.1
+  validity_threshold: 0.7
+  min_appear_frames: 5
 
 # 匹配与稳定性参数（新增）
 matching:

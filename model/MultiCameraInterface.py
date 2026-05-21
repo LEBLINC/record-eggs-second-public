@@ -29,6 +29,7 @@ from model.utils.gpu_manager import GPUManager, GPUBatchProcessor
 import re
 from pyzbar.pyzbar import decode as zbar_decode, ZBarSymbol
 from model.utils.preprocess import _apply_gamma_u8
+from model.inference.model_factory import create_detector, create_matcher
 
 
 class CameraDetector:
@@ -967,12 +968,13 @@ class MultiCameraFrameThread(BaseThread):
 
 
 class MultiCameraTrackThread(BaseThread):
-    def __init__(self, yolo_model, frame_queues, track_queues, batch_size=1, early_emit=None, on_early_qr=None, global_cfg=None):
+    def __init__(self, yolo_model, frame_queues, track_queues, batch_size=1, early_emit=None, on_early_qr=None, global_cfg=None, model_type='yolo'):
         """
         跟踪线程，负责处理多个摄像头的目标检测和跟踪（改进版）
         """
         super().__init__()
         self.yolo_model = yolo_model
+        self.model_type = model_type
         self.frame_queues = frame_queues
         self.track_queues = track_queues
         self.camera_count = len(frame_queues)
@@ -1054,9 +1056,12 @@ class MultiCameraTrackThread(BaseThread):
                 time.sleep(0.005)
                 continue
 
-            # 一次批量推理（固定 batch），避免 tracker 串流/ID 丢失
+            # 一次推理（YOLO: 固定 batch 避免 tracker 串流；RTMDet: 逐帧推理返回 dict）
             try:
-                batch_results = self.yolo_model.batch_track(frames)
+                if self.model_type == 'rtmdet':
+                    batch_results = [self.yolo_model.track(frames[i]) for i in range(self.camera_count)]
+                else:
+                    batch_results = self.yolo_model.batch_track(frames)
             except Exception as e:
                 print(f"批量跟踪异常: {e}")
                 batch_results = [None] * len(frames)
@@ -1088,9 +1093,9 @@ class MultiCameraTrackThread(BaseThread):
                     if not isinstance(track_results, (list, tuple)):
                         track_results = [track_results]
 
-                    # 早期二维码直达UI（只对新帧触发）
+                    # 早期二维码直达UI（只对YOLO新帧触发）
                     try:
-                        if self.early_emit is not None and self.early_decode_enabled:
+                        if self.model_type != 'rtmdet' and self.early_emit is not None and self.early_decode_enabled:
                             now_ms = int(time.time() * 1000)
                             if (now_ms - int(self._early_qr_last_ms[camera_idx] or 0)) >= int(self.early_decode_interval_ms):
                                 self._early_qr_last_ms[camera_idx] = now_ms
@@ -1246,7 +1251,7 @@ class MultiCameraTrackThread(BaseThread):
 
 
 class SingleCameraMatchThread(BaseThread):
-    def __init__(self, camera_idx, matching_instance, track_queue, result_queue, early_emit=None, qr_emit=None):
+    def __init__(self, camera_idx, matching_instance, track_queue, result_queue, early_emit=None, qr_emit=None, model_type='yolo', topology_matcher=None):
         """
         单摄像头匹配线程，独立处理一路摄像头的匹配逻辑，避免串行阻塞
         """
@@ -1257,6 +1262,8 @@ class SingleCameraMatchThread(BaseThread):
         self.result_queue = result_queue
         self.early_emit = early_emit
         self.qr_emit = qr_emit
+        self.model_type = model_type
+        self.topology_matcher = topology_matcher
         self.error_counts = 0
         self.max_errors = 5
 
@@ -1277,6 +1284,12 @@ class SingleCameraMatchThread(BaseThread):
         except queue.Empty:
             return
 
+        # RTMDet 路径：track_results 是 dict {'qr_detections': [...], 'egg_detections': [...]}
+        if self.model_type == 'rtmdet':
+            self._process_rtmdet(frame, track_results)
+            return
+
+        # YOLO 路径（原有逻辑）
         try:
             # 若没有检测结果或为空，直接推送空结果避免下游越界
             if track_results is None or len(track_results) == 0:
@@ -1386,6 +1399,64 @@ class SingleCameraMatchThread(BaseThread):
 
         except Exception as e:
             print(f"摄像头 {self.camera_idx} 匹配处理异常: {e}")
+            self.error_counts += 1
+
+    def _process_rtmdet(self, frame, track_results):
+        """RTMDet 路径：使用 TopologyMatcher 进行蛋-笼匹配"""
+        try:
+            if not isinstance(track_results, dict):
+                self.result_queue.put((frame, []), block=False)
+                return
+
+            qr_dets = track_results.get('qr_detections', [])
+            egg_dets = track_results.get('egg_detections', [])
+            match_results = []
+
+            if self.topology_matcher is not None and (qr_dets or egg_dets):
+                # 构建 egg_centers
+                egg_centers = []
+                for det in egg_dets:
+                    center = det.get('center')
+                    if center is not None:
+                        egg_centers.append((float(center[0]), float(center[1])))
+                    else:
+                        bbox = det.get('bbox', [0, 0, 0, 0])
+                        egg_centers.append(((bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2))
+
+                # 构建 tm_qr_dets
+                tm_qr_dets = []
+                for det in qr_dets:
+                    hbb = det.get('hbb', [0, 0, 0, 0])
+                    cx = (hbb[0] + hbb[2]) / 2.0
+                    cy = (hbb[1] + hbb[3]) / 2.0
+                    tm_qr_dets.append({
+                        'center': (cx, cy),
+                        'hbb': hbb,
+                        'rotated_box': det.get('rotated_box'),
+                        'validity_score': det.get('validity_score', det.get('score', 0.0)),
+                        'score': det.get('score', 0.0),
+                        'class_id': det.get('class_id', 0),
+                    })
+
+                try:
+                    results = self.topology_matcher.match(egg_centers, tm_qr_dets, frame)
+                    if results:
+                        match_results = results if isinstance(results, list) else [results]
+                except Exception as e:
+                    print(f"摄像头 {self.camera_idx} TopologyMatcher 异常: {e}")
+                    self.error_counts += 1
+
+            try:
+                self.result_queue.put((frame, match_results), block=False)
+            except queue.Full:
+                try:
+                    self.result_queue.get(block=False)
+                    self.result_queue.put((frame, match_results), block=False)
+                except (queue.Empty, queue.Full):
+                    pass
+
+        except Exception as e:
+            print(f"摄像头 {self.camera_idx} RTMDet匹配异常: {e}")
             self.error_counts += 1
 
 
@@ -1798,12 +1869,23 @@ class MultiCameraInterface(QThread):
         # 二维码抓拍队列（用于复核）
         self.qr_image_queue = queue.Queue(maxsize=64)
 
-        # 创建/复用 YOLO 模型 (共享以节省GPU与启动时间)
-        self.yolo_model = self.get_or_create_model(cfg)
+        # 创建/复用检测模型（支持 model_type='yolo' 或 'rtmdet'）
+        self.model_type = cfg.get('model_type', 'yolo')
+        if self.model_type == 'rtmdet':
+            self.yolo_model = create_detector(cfg)
+        else:
+            self.yolo_model = self.get_or_create_model(cfg)
 
         # 为每个摄像头创建匹配实例
         self.matching_instances = [MatchingCounting(self._adjust_config_for_camera(cfg, i))
                                    for i in range(self.camera_count)]
+
+        # RTMDet 路径：为每个摄像头创建 TopologyMatcher
+        self.topology_matchers = [None] * self.camera_count
+        if self.model_type == 'rtmdet':
+            for i in range(self.camera_count):
+                camera_cfg = self._adjust_config_for_camera(cfg, i)
+                self.topology_matchers[i] = create_matcher(camera_cfg)
         # 将早期直达UI的回调安装到每个匹配实例（可选使用）
         try:
             for i in range(self.camera_count):
@@ -1963,32 +2045,32 @@ class MultiCameraInterface(QThread):
         # 帧读取线程
         self.frame_thread = MultiCameraFrameThread(self.camera_configs, self.frame_queues)
 
-        # 跟踪线程 - 使用批处理提高GPU利用率
+        # 跟踪线程
         if 'batch_size' in self.global_cfg:
             batch_size = int(self.global_cfg.get('batch_size', 1) or 1)
         else:
-            # 默认值：GPU可用则2-3，否则1
             batch_size = 3 if torch.cuda.is_available() else 1
         batch_size = max(1, min(batch_size, self.camera_count))
         self.track_thread = MultiCameraTrackThread(
             self.yolo_model, self.frame_queues, self.track_queues, batch_size,
             early_emit=lambda cam_idx, results: self.detection_results_generated.emit(cam_idx, results),
             on_early_qr=self._on_track_early_qr,
-            global_cfg=self.global_cfg
+            global_cfg=self.global_cfg,
+            model_type=self.model_type
         )
 
-        # 匹配线程（传入早期结果直达UI的回调）
-        # 改为使用并行 SingleCameraMatchThread，避免单路阻塞影响全局
+        # 匹配线程（每路独立）
         self.match_threads = []
         for i in range(self.camera_count):
             t = SingleCameraMatchThread(
                 i, self.matching_instances[i], self.track_queues[i], self.result_queues[i],
                 early_emit=lambda cam_idx, results: self.detection_results_generated.emit(cam_idx, results),
-                qr_emit=self._enqueue_qr_image
+                qr_emit=self._enqueue_qr_image,
+                model_type=self.model_type,
+                topology_matcher=self.topology_matchers[i] if hasattr(self, 'topology_matchers') else None
             )
             self.match_threads.append(t)
-        
-        # 兼容旧代码引用（虽然不再作为主入口启动）
+
         self.match_thread = None
 
         # HTTP上传线程
