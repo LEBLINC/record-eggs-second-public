@@ -423,6 +423,16 @@ class TopologyMatcher:
             state['miss_frames']    = 0
             state['last_egg_center'] = egg_center
             state['last_frame_count'] = self._frame_count
+            # 记录配对的 QR 中心（供可视化连线使用）
+            qr_for_state = valid_qrs[qr_idx]
+            try:
+                qr_cx = (qr_for_state['hbb'][0] + qr_for_state['hbb'][2]) / 2.0
+                qr_cy = (qr_for_state['hbb'][1] + qr_for_state['hbb'][3]) / 2.0
+                state['last_qr_center'] = (qr_cx, qr_cy)
+            except (KeyError, TypeError, IndexError):
+                center_raw = qr_for_state.get('center')
+                if center_raw is not None:
+                    state['last_qr_center'] = (float(center_raw[0]), float(center_raw[1]))
 
             # 记录最近一次观测到的蛋类别（用于上报时区分好/坏蛋）
             state['last_egg_class_id'] = int(egg_meta_i.get('class_id', 0))

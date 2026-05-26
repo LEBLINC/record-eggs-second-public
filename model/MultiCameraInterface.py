@@ -1466,6 +1466,14 @@ class SingleCameraMatchThread(BaseThread):
                     print(f"摄像头 {self.camera_idx} TopologyMatcher 异常: {e}")
                     self.error_counts += 1
 
+                # 在帧上叠加蛋-笼匹配连线（match 执行完毕后，此时 topology_matcher
+                # 内部已更新 last_egg_center / last_qr_center，可直接读取）
+                try:
+                    from model.inference.pipeline_logic import draw_match_connections
+                    draw_match_connections(annotated, self.topology_matcher, qr_dets)
+                except Exception as e:
+                    print(f"摄像头 {self.camera_idx} 绘制连线异常: {e}")
+
             try:
                 self.result_queue.put((annotated, match_results), block=False)
             except queue.Full:

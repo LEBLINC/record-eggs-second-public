@@ -11,9 +11,9 @@ Angle conventions:
   - cv2.rotatedRectangleIntersection calls: OpenCV degrees, converted via numpy.degrees()
 
 Nine-tensor output schema (3 FPN levels × {cls, bbox, angle}):
-    Index 0: cls_s8    (1, 2, 80, 80)
-    Index 1: cls_s16   (1, 2, 40, 40)
-    Index 2: cls_s32   (1, 2, 20, 20)
+    Index 0: cls_s8    (1, num_classes, 80, 80)
+    Index 1: cls_s16   (1, num_classes, 40, 40)
+    Index 2: cls_s32   (1, num_classes, 20, 20)
     Index 3: bbox_s8   (1, 4, 80, 80)
     Index 4: bbox_s16  (1, 4, 40, 40)
     Index 5: bbox_s32  (1, 4, 20, 20)
@@ -273,13 +273,16 @@ def obb_postprocess(
     Returns:
         dets:   np.ndarray (N, 6) float32 — [cx, cy, w, h, angle_rad, score]
                 Angles are in le90 radians [-π/2, π/2).
-        labels: np.ndarray (N,) int64 — class indices (0=valid_qr, 1=invalid_qr)
+        labels: np.ndarray (N,) int64 — class indices.
+                For 4-class model (third round): 0=valid_qr, 1=invalid_qr,
+                2=tag_qr, 3=obsolete_qr.
+                For legacy 2-class model: 0=valid_qr, 1=invalid_qr.
     """
     strides = [8, 16, 32]
     num_levels = 3
 
     # Unpack outputs: [cls×3, bbox×3, angle×3]
-    cls_scores = raw_outputs[0:3]    # each (1, 2, H, W)
+    cls_scores = raw_outputs[0:3]    # each (1, num_classes, H, W)
     bbox_preds = raw_outputs[3:6]    # each (1, 4, H, W)
     angle_preds = raw_outputs[6:9]   # each (1, 1, H, W)
 
@@ -287,17 +290,23 @@ def obb_postprocess(
     all_scores = []
     all_labels = []
 
+    # Infer num_classes from the cls head channel dimension. Old training runs
+    # had 2 classes (valid_qr / invalid_qr); the third-round model expanded to
+    # 4 classes (+ tag_qr, obsolete_qr). Reading it from the tensor shape keeps
+    # this postprocess valid for both checkpoints.
+    num_classes = int(cls_scores[0].shape[1])
+
     for lvl in range(num_levels):
         stride = strides[lvl]
 
-        cls = cls_scores[lvl][0]     # (2, H, W)
+        cls = cls_scores[lvl][0]     # (num_classes, H, W)
         bbox = bbox_preds[lvl][0]    # (4, H, W)
         ang = angle_preds[lvl][0]    # (1, H, W)
 
         _, feat_h, feat_w = cls.shape
 
-        # (2, H, W) → (H*W, 2), apply sigmoid
-        cls_flat = cls.reshape(2, -1).T                    # (H*W, 2)
+        # (num_classes, H, W) → (H*W, num_classes), apply sigmoid
+        cls_flat = cls.reshape(num_classes, -1).T          # (H*W, num_classes)
         cls_flat = 1.0 / (1.0 + np.exp(-cls_flat))        # sigmoid
 
         # (4, H, W) → (H*W, 4)

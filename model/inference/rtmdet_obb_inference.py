@@ -158,14 +158,43 @@ class RTMDetOBBInference:
       - 格式 A：(1, N, 6)  → [cx, cy, w, h, angle, score]（单类或最高分类）
       - 格式 B：(1, N, 5+num_classes) → [cx, cy, w, h, angle, cls0_score, cls1_score, ...]
 
-    类别定义：
-      - class 0: valid_qr   （有效二维码）
-      - class 1: invalid_qr （无效二维码）
+    类别定义（第三轮训练，2026-05-26 起部署的 4 类模型）：
+      - class 0: valid_qr     白色横梁上能成功解码的二维码（业务目标）
+      - class 1: invalid_qr   白色横梁上模糊/反光导致无法解码的二维码（业务目标）
+      - class 2: tag_qr       笼丝上挂着的小型白色塑料标签二维码（非业务，运行时丢弃）
+      - class 3: obsolete_qr  钢轨上贴着的废弃二维码贴纸（非业务，运行时丢弃）
+
+    部署侧只对 valid_qr / invalid_qr 这两个业务类负责；tag_qr / obsolete_qr
+    在训练里作为"显式负样本类"提升判别能力，但推理结果会在 _postprocess 阶段
+    用 _is_business_class() 过滤掉，对下游完全不可见。
+
+    向后兼容：当加载到上一轮（2 类）的 OBB 模型时，class_id 只可能是 {0, 1}，
+    _is_business_class() 仍然全部接受，逻辑不变。
     """
 
-    NUM_CLASSES = 2
-    CLASS_VALID_QR   = 0
-    CLASS_INVALID_QR = 1
+    # 模型支持的全部类别数（第三轮起为 4，前两轮为 2）。obb_postprocess.py 已
+    # 升级为 num_classes-agnostic（从 cls 张量形状自动推断），所以这个常量仅
+    # 用于文档说明，不参与运行期 reshape 决策。
+    NUM_CLASSES = 4
+
+    # 类别 ID 常量（与训练 config 的 metainfo['classes'] 顺序严格一致）
+    CLASS_VALID_QR    = 0
+    CLASS_INVALID_QR  = 1
+    CLASS_TAG_QR      = 2
+    CLASS_OBSOLETE_QR = 3
+
+    # 业务类（部署时只把这两类透传到下游）
+    BUSINESS_CLASS_IDS = frozenset({CLASS_VALID_QR, CLASS_INVALID_QR})
+
+    @classmethod
+    def _is_business_class(cls, class_id: int) -> bool:
+        """返回 True 当且仅当该 class_id 是部署侧关心的业务类（valid_qr / invalid_qr）。
+
+        非业务类（tag_qr / obsolete_qr）在推理结果组装阶段被丢弃，
+        让下游所有代码（pipeline_logic、result_adapter、matchingCounting）
+        对 4 类模型完全无感、按 2 类继续工作。
+        """
+        return class_id in cls.BUSINESS_CLASS_IDS
 
     def __init__(
         self,
@@ -398,19 +427,21 @@ class RTMDetOBBInference:
         # 坐标逆变换：letterbox 空间 → 原始图像空间
         boxes_orig = self.preprocessor.inverse_transform_rotated_boxes(boxes_lbspace, meta)
 
-        # 组装结果，过滤仍然异常大的框（w 或 h 超过原图对应维度的 80% 视为误检）
-        orig_h, orig_w = meta['orig_shape']
-        max_w = orig_w * 0.8
-        max_h = orig_h * 0.8
-
+        # 组装结果。第三轮起：
+        #   1) 不再过滤"超大异常框"——v2 的 *stride 补丁导致部分正常框被
+        #      decode 成原图的 8/16/32 倍，在 v3 ONNX 上已修复（obb_postprocess
+        #      不再 *stride），因此 80% 启发过滤变成多余甚至会过滤正常大目标。
+        #   2) 用 _is_business_class() 显式丢弃非业务类（tag_qr / obsolete_qr），
+        #      让下游所有代码对 4 类完全无感、按 2 类继续工作。
         results = []
         for i in range(len(boxes_orig)):
             cx, cy, w, h, angle = boxes_orig[i].tolist()
             cid   = int(class_ids[i])
             score = float(scores[i])
 
-            # 过滤超大异常框
-            if w > max_w or h > max_h:
+            # 丢弃非业务类（tag_qr=2 / obsolete_qr=3）。这两类是训练时的
+            # "显式负样本类"，在部署里完全不向下游透出。
+            if not self._is_business_class(cid):
                 continue
 
             x1, y1, x2, y2 = obb_to_hbb(cx, cy, w, h, angle)
@@ -507,20 +538,22 @@ class RTMDetOBBInference:
         # and preserves angle (col 4) unchanged
         boxes_orig = self.preprocessor.inverse_transform_rotated_boxes(boxes_lbspace, meta)
 
-        # Assemble results — same dict format as (N,6) and (N,5+C) branches
-        # Filter out abnormally large boxes (w or h > 80% of original image dimension)
-        orig_h, orig_w = meta['orig_shape']
-        max_w = orig_w * 0.8
-        max_h = orig_h * 0.8
-
+        # Assemble results — same dict format as (N,6) and (N,5+C) branches.
+        # Round-3 changes:
+        #   1) Removed the legacy 80% size filter — v2 had a *stride bug in
+        #      obb_postprocess that produced 8/16/32× oversized boxes, hence
+        #      the heuristic. v3 ONNX export bakes stride into the graph, so
+        #      this filter is no longer needed (and would clip valid targets).
+        #   2) Drop non-business classes (tag_qr=2, obsolete_qr=3) so downstream
+        #      pipeline_logic / matchingCounting only ever sees valid_qr / invalid_qr.
         results = []
         for i in range(len(boxes_orig)):
             cx, cy, w, h, angle = boxes_orig[i].tolist()
             cid = int(class_ids[i])
             score = float(scores[i])
 
-            # Filter oversized false positives
-            if w > max_w or h > max_h:
+            # Drop non-business QR classes (tag_qr / obsolete_qr).
+            if not self._is_business_class(cid):
                 continue
 
             # HBB from rotated box (angle is in radians, obb_to_hbb expects degrees)

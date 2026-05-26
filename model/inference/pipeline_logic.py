@@ -380,3 +380,97 @@ def draw_rtmdet_detections(
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
     except Exception as e:
         print(f"draw_rtmdet_detections: 绘制检测框异常: {e}")
+
+
+def draw_match_connections(
+    frame: np.ndarray,
+    topology_matcher,
+    qr_dets: List[Dict],
+) -> None:
+    """
+    在帧上叠加蛋-笼匹配连线。
+
+    对 TopologyMatcher 中每个 occupied/confirmed 状态的笼位，
+    从蛋中心点向对应 QR 中心点画一条彩色连线，并在连线中点标注笼位 ID。
+
+    颜色规则（便于快速读图）：
+      - confirmed（已锁定）：绿色实线
+      - occupied  （积累中）：黄色虚线（通过短折线模拟）
+
+    Args:
+        frame:            BGR 图像（原地修改）
+        topology_matcher: TopologyMatcher 实例（可为 None，则直接返回）
+        qr_dets:          当前帧的 QR 检测列表（用于查找 QR 框中心）
+    """
+    if topology_matcher is None:
+        return
+
+    try:
+        # 构建 cage_id → QR 中心 的快速查找表（来自当前帧检测结果）
+        qr_center_by_cage: Dict[str, Tuple[int, int]] = {}
+        for det in qr_dets:
+            cage_id = det.get('cage_id') or det.get('decode_id')
+            if not cage_id:
+                continue
+            hbb = det.get('hbb')
+            if hbb and len(hbb) >= 4:
+                cx = int((hbb[0] + hbb[2]) / 2)
+                cy = int((hbb[1] + hbb[3]) / 2)
+                qr_center_by_cage[str(cage_id)] = (cx, cy)
+
+        all_states = topology_matcher.get_all_cage_states()
+        if not all_states:
+            return
+
+        for cage_id, state in all_states.items():
+            status = state.get('status', 'empty')
+            if status not in ('occupied', 'confirmed'):
+                continue
+
+            egg_center = state.get('last_egg_center')
+            if egg_center is None:
+                continue
+
+            ex, ey = int(egg_center[0]), int(egg_center[1])
+
+            # 优先使用当前帧解码到的 QR 中心；否则尝试从 state 备查
+            qr_pt = qr_center_by_cage.get(str(cage_id))
+            if qr_pt is None:
+                # 如果这一帧 QR 暂时出画面，使用上一次记录的（兼容短暂丢帧）
+                last_qr = state.get('last_qr_center')
+                if last_qr is None:
+                    continue
+                qr_pt = (int(last_qr[0]), int(last_qr[1]))
+
+            qx, qy = qr_pt
+
+            if status == 'confirmed':
+                # 绿色实线 + 实心圆端点
+                cv2.line(frame, (ex, ey), (qx, qy), (0, 230, 80), 2, cv2.LINE_AA)
+                cv2.circle(frame, (ex, ey), 6, (0, 230, 80), -1)
+                cv2.circle(frame, (qx, qy), 5, (0, 230, 80), 2)
+                # 中点标注笼位 ID
+                mx = (ex + qx) // 2
+                my = (ey + qy) // 2
+                label = str(cage_id)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.rectangle(frame,
+                               (mx - 2, my - th - 4),
+                               (mx + tw + 2, my + 2),
+                               (0, 0, 0), -1)
+                cv2.putText(frame, label, (mx, my),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 230, 80), 1, cv2.LINE_AA)
+            else:
+                # 黄色短折线（模拟虚线）
+                dx, dy = qx - ex, qy - ey
+                length = max(1, int((dx ** 2 + dy ** 2) ** 0.5))
+                num_segments = max(4, length // 15)
+                for seg in range(num_segments):
+                    t0 = seg / num_segments
+                    t1 = (seg + 0.5) / num_segments
+                    p0 = (int(ex + t0 * dx), int(ey + t0 * dy))
+                    p1 = (int(ex + t1 * dx), int(ey + t1 * dy))
+                    cv2.line(frame, p0, p1, (0, 210, 255), 2, cv2.LINE_AA)
+
+    except Exception as e:
+        print(f"draw_match_connections: 绘制连线异常: {e}")
